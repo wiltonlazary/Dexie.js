@@ -791,32 +791,37 @@ Observable.deleteOldChanges = function(db) {
 Observable._onStorage = function onStorage(event) {
     // We use the onstorage event to trigger onLatestRevisionIncremented since we will wake up when other windows modify the DB as well!
     if (event.key.indexOf("Dexie.Observable/") === 0) { // For example "Dexie.Observable/latestRevision/FriendsDB"
-        var parts = event.key.split('/');
-        var prop = parts[1];
-        var dbname = parts[2];
-        if (prop === 'latestRevision') {
-            var rev = parseInt(event.newValue, 10);
-            if (!isNaN(rev) && rev > Observable.latestRevision[dbname]) {
-                Observable.latestRevision[dbname] = rev;
-                Dexie.ignoreTransaction(function() {
+        // _onStorage may be called synchronously and derive the zone where localStorage.setItem() was called.
+        // Make sure that any database operation that origins from this scope is not bound to any ongoing transaction.
+        // This is accomplished by using Dexie.ignoreTransaction
+        Dexie.ignoreTransaction(function() {
+            var parts = event.key.split('/');
+            var prop = parts[1];
+            var dbname = parts[2];
+            if (prop === 'latestRevision') {
+                var rev = parseInt(event.newValue, 10);
+                if (!isNaN(rev) && rev > Observable.latestRevision[dbname]) {
+                    Observable.latestRevision[dbname] = rev;
                     Observable.on('latestRevisionIncremented').fire(dbname, rev);
-                });
+                }
+            } else if (prop.indexOf("deadnode:") === 0) {
+                var nodeID = parseInt(prop.split(':')[1], 10);
+                if (event.newValue) {
+                    Observable.on.suicideNurseCall.fire(dbname, nodeID);
+                }
+            } else if (prop === 'intercomm') {
+                if (event.newValue) {
+                    Observable.on.intercomm.fire(dbname);
+                }
             }
-        } else if (prop.indexOf("deadnode:") === 0) {
-            var nodeID = parseInt(prop.split(':')[1], 10);
-            if (event.newValue) {
-                Observable.on.suicideNurseCall.fire(dbname, nodeID);
-            }
-        } else if (prop === 'intercomm') {
-            if (event.newValue) {
-                Observable.on.intercomm.fire(dbname);
-            }
-        }
+        });
     }
 };
 
 Observable._onBeforeUnload = function() {
-    Observable.on.beforeunload.fire();
+    Dexie.ignoreTransaction(()=>{
+        Observable.on.beforeunload.fire();
+    });
 };
 
 Observable.localStorageImpl = global.localStorage;
