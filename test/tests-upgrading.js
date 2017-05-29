@@ -47,14 +47,18 @@ test("upgrade", (assert) => {
         // Add baseTables.
         expected = expected.concat(baseTables).sort();
         // Already sorted.
-        var idbNames = [...db.backendDB().objectStoreNames];
+        var idbNames = [].slice.call(db.backendDB().objectStoreNames);
         var dexieNames = db.tables.map(t => t.name).sort();
         deepEqual(dexieNames,
                   expected,
                   "Dexie.tables must match expected.");
-        deepEqual(idbNames,
-                  expected,
-                  "IDB object stores must match expected.");
+        if (supports("deleteObjectStoreAfterRead")) {
+            // Special treatment for IE/Edge where Dexie avoids deleting the actual store to avoid a bug.
+            // This special treatment in the unit tests may not need to be here if we can work around Dexie issue #1.
+            deepEqual(idbNames,
+                    expected,
+                    "IDB object stores must match expected.");
+        }
     }
 
     function checkTransactionObjectStores(t, expected) {

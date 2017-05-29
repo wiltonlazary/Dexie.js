@@ -1,4 +1,6 @@
+tools/
 src/
-test/
-build/
 .*
+tmp/
+**/tmp/
+test

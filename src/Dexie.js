@@ -66,8 +66,10 @@ var DEXIE_VERSION = '{version}',
     isIEOrEdge = typeof navigator !== 'undefined' && /(MSIE|Trident|Edge)/.test(navigator.userAgent),
     hasIEDeleteObjectStoreBug = isIEOrEdge,
     hangsOnDeleteLargeKeyRange = isIEOrEdge,
-    dexieStackFrameFilter = frame => !/(dexie\.js|dexie\.min\.js)/.test(frame);
+    dexieStackFrameFilter = frame => !/(dexie\.js|dexie\.min\.js)/.test(frame),
+    dbNamesDB;// Global database for backing Dexie.getDatabaseNames() on browser without indexedDB.webkitGetDatabaseNames() 
 
+// Init debug
 Debug.setDebug(Debug.debug, dexieStackFrameFilter);
 
 export default function Dexie(dbName, options) {
@@ -77,8 +79,8 @@ export default function Dexie(dbName, options) {
         // Default Options
         addons: Dexie.addons,           // Pick statically registered addons by default
         autoOpen: true,                 // Don't require db.open() explicitely.
-        indexedDB: deps.indexedDB,      // Backend IndexedDB api. Default to IDBShim or browser env.
-        IDBKeyRange: deps.IDBKeyRange   // Backend IDBKeyRange api. Default to IDBShim or browser env.
+        indexedDB: deps.indexedDB,      // Backend IndexedDB api. Default to browser env.
+        IDBKeyRange: deps.IDBKeyRange   // Backend IDBKeyRange api. Default to browser env.
     }, options);
     var addons = opts.addons,
         autoOpen = opts.autoOpen,
@@ -93,6 +95,7 @@ export default function Dexie(dbName, options) {
     var idbdb = null; // Instance of IDBDatabase
     var dbOpenError = null;
     var isBeingOpened = false;
+    var onReadyBeingFired = null;
     var openComplete = false;
     var READONLY = "readonly", READWRITE = "readwrite";
     var db = this;
@@ -422,7 +425,8 @@ export default function Dexie(dbName, options) {
             }
             return dbReadyPromise.then(()=>tempTransaction(mode, storeNames, fn));
         } else {
-            var trans = db._createTransaction(mode, storeNames, globalSchema).create();
+            var trans = db._createTransaction(mode, storeNames, globalSchema);
+            try { trans.create(); } catch (ex) { return rejection(ex); }
             return trans._promise(mode, function (resolve, reject) {
                 return newScope(function () { // OPTIMIZATION POSSIBLE? newScope() not needed because it's already done in _promise.
                     PSD.trans = trans;
@@ -542,22 +546,29 @@ export default function Dexie(dbName, options) {
                     db.on("versionchange").fire(ev);
                 });
                 
-                if (!hasNativeGetDatabaseNames) {
-                    // Update localStorage with list of database names
-                    globalDatabaseList(function (databaseNames) {
-                        if (databaseNames.indexOf(dbName) === -1) return databaseNames.push(dbName);
-                    });
+                if (!hasNativeGetDatabaseNames && dbName !== '__dbnames') {
+                    dbNamesDB.dbnames.put({name: dbName}).catch(nop);
                 }
-                
+
                 resolve();
 
             }, reject);
-        })]).then(()=>{
+        })]).then(() => {
             // Before finally resolving the dbReadyPromise and this promise,
             // call and await all on('ready') subscribers:
             // Dexie.vip() makes subscribers able to use the database while being opened.
             // This is a must since these subscribers take part of the opening procedure.
-            return Dexie.vip(db.on.ready.fire);
+            onReadyBeingFired = [];
+            return Promise.resolve(Dexie.vip(db.on.ready.fire)).then(function fireRemainders() {
+                if (onReadyBeingFired.length > 0) {
+                    // In case additional subscribers to db.on('ready') were added during the time db.on.ready.fire was executed.
+                    let remainders = onReadyBeingFired.reduce(promisableChain, nop);
+                    onReadyBeingFired = [];
+                    return Promise.resolve(Dexie.vip(remainders)).then(fireRemainders)
+                }
+            });
+        }).finally(()=>{
+            onReadyBeingFired = null;
         }).then(()=>{
             // Resolve the db.open() with the db instance.
             isBeingOpened = false;
@@ -612,10 +623,7 @@ export default function Dexie(dbName, options) {
                 var req = indexedDB.deleteDatabase(dbName);
                 req.onsuccess = wrap(function () {
                     if (!hasNativeGetDatabaseNames) {
-                        globalDatabaseList(function(databaseNames) {
-                            var pos = databaseNames.indexOf(dbName);
-                            if (pos >= 0) return databaseNames.splice(pos, 1);
-                        });
+                        dbNamesDB.dbnames.delete(dbName).catch(nop);
                     }
                     resolve();
                 });
@@ -632,6 +640,9 @@ export default function Dexie(dbName, options) {
     this.isOpen = function () {
         return idbdb !== null;
     };
+    this.hasBeenClosed = function () {
+        return dbOpenError && (dbOpenError instanceof exceptions.DatabaseClosed);
+    }
     this.hasFailed = function () {
         return dbOpenError !== null;
     };
@@ -645,10 +656,12 @@ export default function Dexie(dbName, options) {
     this.name = dbName;
 
     // db.tables - an array of all Table instances.
-    setProp(this, "tables", {
-        get: function () {
-            /// <returns type="Array" elementType="Table" />
-            return keys(allTables).map(function (name) { return allTables[name]; });
+    props(this, {
+        tables: {
+            get () {
+                /// <returns type="Array" elementType="Table" />
+                return keys(allTables).map(function (name) { return allTables[name]; });
+            }
         }
     });
 
@@ -664,7 +677,11 @@ export default function Dexie(dbName, options) {
                     // Database already open. Call subscriber asap.
                     if (!dbOpenError) Promise.resolve().then(subscriber);
                     // bSticky: Also subscribe to future open sucesses (after close / reopen) 
-                    if (bSticky) subscribe(subscriber); 
+                    if (bSticky) subscribe(subscriber);
+                } else if (onReadyBeingFired) {
+                    // db.on('ready') subscribers are currently being executed and have not yet resolved or rejected
+                    onReadyBeingFired.push(subscriber);
+                    if (bSticky) subscribe(subscriber);
                 } else {
                     // Database not yet open. Subscribe to it.
                     subscribe(subscriber);
@@ -756,6 +773,10 @@ export default function Dexie(dbName, options) {
                         }
                     });
                 }
+                if (onlyIfCompatible && parentTransaction && !parentTransaction.active) {
+                    // '?' mode should not keep using an inactive transaction.
+                    parentTransaction = null;
+                }
             }
         } catch (e) {
             return parentTransaction ?
@@ -765,7 +786,12 @@ export default function Dexie(dbName, options) {
         // If this is a sub-transaction, lock the parent and then launch the sub-transaction.
         return (parentTransaction ?
             parentTransaction._promise(mode, enterTransactionScope, "lock") :
-            db._whenReady (enterTransactionScope));
+            PSD.trans ?
+                // no parent transaction despite PSD.trans exists. Make sure also
+                // that the zone we create is not a sub-zone of current, because
+                // Promise.follow() should not wait for it if so.
+                usePSD(PSD.transless, ()=>db._whenReady(enterTransactionScope)) :
+                db._whenReady (enterTransactionScope));
             
         function enterTransactionScope() {
             return Promise.resolve().then(()=>{
@@ -811,7 +837,7 @@ export default function Dexie(dbName, options) {
                     Promise.resolve(returnValue).then(x => trans.active ?
                         x // Transaction still active. Continue.
                         : rejection(new exceptions.PrematureCommit(
-                            "Transaction committed too early. See http://bit.ly/2eVASrf")))
+                            "Transaction committed too early. See http://bit.ly/2kdckMn")))
                     // No promise returned. Wait for all outstanding promises before continuing. 
                     : promiseFollowed.then(()=>returnValue)
                 ).then(x => {
@@ -1407,13 +1433,17 @@ export default function Dexie(dbName, options) {
         });
         
         this._completion.then(
-            ()=> {this.on.complete.fire();},
+            ()=> {
+                this.active = false;
+                this.on.complete.fire();
+            },
             e => {
+                var wasActive = this.active;
+                this.active = false;
                 this.on.error.fire(e);
                 this.parent ?
                     this.parent._reject(e) :
-                    this.active && this.idbtrans && this.idbtrans.abort();
-                this.active = false;
+                    wasActive && this.idbtrans && this.idbtrans.abort();
                 return rejection(e); // Indicate we actually DO NOT catch this error.
             });
     }
@@ -1479,7 +1509,7 @@ export default function Dexie(dbName, options) {
             });
             idbtrans.onabort = wrap(ev => {
                 preventDefault(ev);
-                this.active && this._reject(new exceptions.Abort());
+                this.active && this._reject(new exceptions.Abort(idbtrans.error));
                 this.active = false;
                 this.on("abort").fire(ev);
             });
@@ -2872,20 +2902,6 @@ function preventDefault(event) {
         event.preventDefault();
 }
 
-function globalDatabaseList(cb) {
-    var val,
-        localStorage = Dexie.dependencies.localStorage;
-    if (!localStorage) return cb([]); // Envs without localStorage support
-    try {
-        val = JSON.parse(localStorage.getItem('Dexie.DatabaseNames') || "[]");
-    } catch (e) {
-        val = [];
-    }
-    if (cb(val)) {
-        localStorage.setItem('Dexie.DatabaseNames', JSON.stringify(val));
-    }
-}
-
 function awaitIterator (iterator) {
     var callNext = result => iterator.next(result),
         doThrow = error => iterator.throw(error),
@@ -2945,10 +2961,6 @@ function TableSchema(name, primKey, indexes, instanceTemplate) {
     this.idxByName = arrayToObject(indexes, index => [index.name, index]);
 }
 
-// Used in when defining dependencies later...
-// (If IndexedDBShim is loaded, prefer it before standard indexedDB)
-var idbshim = _global.idbModules && _global.idbModules.shimIndexedDB ? _global.idbModules : {};
-
 function safariMultiStoreFix(storeNames) {
     return storeNames.length === 1 ? storeNames[0] : storeNames;
 }
@@ -2993,21 +3005,14 @@ props(Dexie, {
     // Static method for retrieving a list of all existing databases at current host.
     //
     getDatabaseNames: function (cb) {
-        return new Promise(function (resolve, reject) {
-            var getDatabaseNames = getNativeGetDatabaseNamesFn(indexedDB);
-            if (getDatabaseNames) { // In case getDatabaseNames() becomes standard, let's prepare to support it:
-                var req = getDatabaseNames();
-                req.onsuccess = function (event) {
-                    resolve(slice(event.target.result, 0)); // Converst DOMStringList to Array<String>
-                };
-                req.onerror = eventRejectHandler(reject);
-            } else {
-                globalDatabaseList(function (val) {
-                    resolve(val);
-                    return false;
-                });
-            }
-        }).then(cb);
+        var getDatabaseNames = getNativeGetDatabaseNamesFn(Dexie.dependencies.indexedDB);
+        return getDatabaseNames ? new Promise((resolve, reject) => {
+            var req = getDatabaseNames();
+            req.onsuccess = function (event) {
+                resolve(slice(event.target.result, 0)); // Converst DOMStringList to Array<String>
+            };
+            req.onerror = eventRejectHandler(reject);
+        }).then(cb) : dbNamesDB.dbnames.toCollection().primaryKeys(cb);
     },
     
     defineClass: function (structure) {
@@ -3164,8 +3169,8 @@ props(Dexie, {
     //
     dependencies: {
         // Required:
-        indexedDB: idbshim.shimIndexedDB || _global.indexedDB || _global.mozIndexedDB || _global.webkitIndexedDB || _global.msIndexedDB,
-        IDBKeyRange: idbshim.IDBKeyRange || _global.IDBKeyRange || _global.webkitIDBKeyRange
+        indexedDB: _global.indexedDB || _global.mozIndexedDB || _global.webkitIndexedDB || _global.msIndexedDB,
+        IDBKeyRange: _global.IDBKeyRange || _global.webkitIDBKeyRange
     },
     
     // API Version Number: Type Number, make sure to always set a version number that can be comparable correctly. Example: 0.9, 0.91, 0.92, 1.0, 1.01, 1.1, 1.2, 1.21, etc.
@@ -3178,14 +3183,13 @@ props(Dexie, {
     // https://github.com/dfahlander/Dexie.js/issues/186
     // typescript compiler tsc in mode ts-->es5 & commonJS, will expect require() to return
     // x.default. Workaround: Set Dexie.default = Dexie.
-    default: Dexie
-});
-
-tryCatch(()=>{
-    // Optional dependencies
-    // localStorage
-    Dexie.dependencies.localStorage =
-        ((typeof chrome !== "undefined" && chrome !== null ? chrome.storage : void 0) != null ? null : _global.localStorage);
+    default: Dexie,
+    // Make it possible to import {Dexie} (non-default import)
+    // Reason 1: May switch to that in future.
+    // Reason 2: We declare it both default and named exported in d.ts to make it possible
+    // to let addons extend the Dexie interface with Typescript 2.1 (works only when explicitely
+    // exporting the symbol, not just default exporting)
+    Dexie: Dexie
 });
 
 // Map DOMErrors and DOMExceptions to corresponding Dexie errors. May change in Dexie v2.0.
@@ -3196,3 +3200,18 @@ doFakeAutoComplete(function() {
     Dexie.fakeAutoComplete = fakeAutoComplete = doFakeAutoComplete;
     Dexie.fake = fake = true;
 });
+
+// Initialize dbNamesDB (won't ever be opened on chromium browsers')
+dbNamesDB = new Dexie('__dbnames'); 
+dbNamesDB.version(1).stores({dbnames: 'name'});
+
+(()=>{
+    // Migrate from Dexie 1.x database names stored in localStorage:
+    var DBNAMES = 'Dexie.DatabaseNames';
+    if (typeof localStorage !== undefined && _global.document !== undefined) try {
+        // Have localStorage and is not executing in a worker. Lets migrate from Dexie 1.x.
+        JSON.parse(localStorage.getItem(DBNAMES) || "[]")
+            .forEach(name => dbNamesDB.dbnames.put({name: name}).catch(nop));
+        localStorage.removeItem(DBNAMES);
+    } catch (_e) {}
+})();

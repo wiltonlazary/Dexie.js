@@ -25,6 +25,10 @@ module("transaction", {
 var NativePromise = window.Promise;
 
 asyncTest("Transaction should work when returning native Promise in transaction scope", function() {
+    if (!NativePromise) {
+        ok(true, "Current Browser doesn't have a native Promise");
+        return start();
+    }
     db.transaction('rw', db.users, trans => {
         ok(Dexie.currentTransaction === trans, "First argument to transaction callback should be the transaction instance itself");
         return NativePromise.resolve().then(()=> {
@@ -748,40 +752,40 @@ asyncTest("Dexie.currentTransaction in CRUD hooks", 53, function () {
     db.users.hook.updating.subscribe(onUpdating);
     db.users.hook.deleting.subscribe(onDeleting);
 
-    function doTheTests() {
-        db.users.add({ username: "monkey1" });
-        db.users.add({ username: "monkey1" }).catch(function(ex) {
+    async function doTheTests() {
+        await db.users.add({ username: "monkey1" });
+        await db.users.add({ username: "monkey1" }).catch(function(ex) {
             ok(true, "Should fail adding a second monkey1");
         }); // Trigger creating.onerror
         // Test bulkAdd as well:
         ok(true, "Testing bulkAdd");
-        db.users.bulkAdd([{ username: "monkey1" }, { username: "monkey2" }])
+        await db.users.bulkAdd([{ username: "monkey1" }, { username: "monkey2" }])
             .then(()=>ok(false, "Should get error on one of the adds"))
             .catch(Dexie.BulkError, e=>{
                 ok(true, "Got BulkError");
                 ok(e.failures.length === 1, "One error out of two: " + e);
-            });
-        db.users.where("username").equals("monkey1").modify({
+        });
+        await db.users.where("username").equals("monkey1").modify({
             name: "Monkey 1"
         });
-        db.users.where("username").equals("monkey1").modify(function (user) {
+        await db.users.where("username").equals("monkey1").modify(user => {
             user.username = "monkey2";// trigger updating.onerror
         }).catch(function(ex) {
             ok(true, "Should fail modifying primary key");
         });
-        db.users.toArray();
-        db.users.delete("monkey2");
-        return db.users.delete("monkey1");
+        await db.users.toArray();
+        await db.users.delete("monkey2");
+        await db.users.delete("monkey1");
     };
 
     doTheTests().then(function () {
         ok(true, "Now in an explicit transaction block...");
-        return db.transaction('rw', db.users, function() {
-            doTheTests();
+        return db.transaction('rw', db.users, async () => {
+            await doTheTests();
         });
     }).catch(function(ex) {
         ok(false, ex);
-    }).finally(function() {
+    }).then(() => {
         db.users.hook.creating.unsubscribe(onCreating);
         db.users.hook.reading.unsubscribe(onReading);
         db.users.hook.updating.unsubscribe(onUpdating);
@@ -891,4 +895,73 @@ promisedTest("Dexie.waitFor() TransactionInactiveError", async() => {
     }).catch ('PrematureCommitError', err => {
         ok(true, 'Got PrematureCommitError as expected');
     });
+});
+
+promisedTest("Promise.follow() should omit promises spawned under Dexie.ignoreTransaction()", async ()=>{
+    let resolve, reject;
+    const p = new Promise((res, rej) => { resolve = res; reject = rej; });
+    const log = [];
+
+    await db.transaction('r', db.users, function () {
+        // Since we do not return a promise here,
+        // Promise.follow() will be used for awaitint all tasks.
+        // However, tasks spawned under Dexie.ignoreTransacion() should not be included in promises to wait for.
+        Dexie.ignoreTransaction(()=>{
+            return new Dexie.Promise(resolve => setTimeout(resolve, 50)).then(()=>{
+                return db.pets.put({kind: "dog"});
+            }).then(()=>{
+                return db.pets.count();
+            }).then(numPets => {
+                ok(true, `num pets: ${numPets}`);
+                log.push("inner-task-done");
+            }).then(resolve, reject);
+        });
+        // The following promise should be awaited for though (because new Promise is spawned from withing a zone or sub-zone to current transaction.)
+        new Dexie.Promise(resolve => setTimeout(resolve, 25)).then(()=>{
+            //return db.users.get(1);
+        }).then(()=>{
+            ok(true, "followed promise done");
+            log.push("spawned-promise-done");
+        }).catch(e => {
+            ok(false, e);
+        });
+    });
+
+    log.push("outer-task-done");
+    ok(true, "transaction done");
+
+    await p;
+
+    equal(log.join(','), "spawned-promise-done,outer-task-done,inner-task-done", "outer-task-done should have happened before inner-task-done");
+
+});
+
+promisedTest("db.transaction() should not wait for non-awaited new top-level transactions to commit", async ()=>{
+    let resolve, reject;
+    const p = new Promise((res, rej) => { resolve = res; reject = rej; });
+    const log = [];
+
+    await db.transaction('r', db.users, () => {
+        // Since we do not return a promise here,
+        // Promise.follow() will be used for awaitint all tasks.
+        // However, if we spawn a new top-level transaction. It should be omitted and not waited for:
+        db.transaction('rw!', db.pets, () => {
+            return db.pets.put({kind: "dog"}).then(()=>{
+                return db.pets.count();
+            }).then(numPets => {
+                ok(true, `num pets: ${numPets}`);
+            }).then(()=>{
+                return Dexie.waitFor(sleep(50)); // In IE, it sometimes happens that outer transaction is slow to commit (even though it doesnt to anything)
+            }).then(()=>{
+                log.push("inner-transaction-done");
+            }).then(resolve, reject);
+        });
+    });
+
+    log.push("outer-transaction-done");
+    ok(true, "transaction done");
+
+    await p;
+
+    equal(log.join(','), "outer-transaction-done,inner-transaction-done", "outer-transaction-done should have happened before inner-transaction-done");
 });

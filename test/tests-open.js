@@ -1,6 +1,6 @@
 ﻿import Dexie from 'dexie';
 import {module, stop, start, asyncTest, equal, ok} from 'QUnit';
-import {spawnedTest, supports} from './dexie-unittest-utils';
+import {promisedTest, spawnedTest, supports} from './dexie-unittest-utils';
 
 const async = Dexie.async;
 
@@ -189,7 +189,7 @@ asyncTest("open database without specifying version or schema", Dexie.Observable
     });
 });
 
-asyncTest("Dexie.getDatabaseNames", 11, function () {
+asyncTest("Dexie.getDatabaseNames", 13, function () {
     var defaultDatabases = [];
     var db1, db2;
     Dexie.getDatabaseNames(function (names) {
@@ -226,6 +226,13 @@ asyncTest("Dexie.getDatabaseNames", 11, function () {
     }).then(function (names) {
         equal(names.length, defaultDatabases.length, "All of our databases have been deleted");
         ok(!names.indexOf("TestDB2") !== -1, "TestDB2 not in database list anymore");
+    }).then(function (names) {
+        return Dexie.exists("nonexistingDB");
+    }).then(function (exists) {
+        ok(!exists, "'nonexistingDB' should not exist indeed");
+        return Dexie.getDatabaseNames();
+    }).then(function (names) {
+        ok(!names.indexOf("nonexistingDB") !== -1, "nonexistingDB must not have been recorded when calling Dexie.exists()");
     }).catch(function (err) {
         ok(false, err.stack || err);
     }).finally(function () {
@@ -469,4 +476,29 @@ asyncTest("#306 db.on('ready') subscriber should be called also if db is already
     }).catch (err => {
         ok(false, err.stack || err);
     }).finally(start);
+});
+
+promisedTest("#392 db.on('ready') don't fire if subscribed while waiting other promise-returning subscriber", async ()=>{
+    //const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    let db = new Dexie('TestDB');
+    db.version(1).stores({foobar: 'id'});
+    let first = false, second = false, third = false;
+
+    // first is registered before open
+    db.on('ready', async ()=> {
+        first = true;
+        // second is registered while first is executing
+        db.on('ready', ()=>{
+            second = true;
+        });
+    });
+
+    await db.open();
+    db.on('ready', ()=>third = true);
+    await Dexie.Promise.resolve();
+
+    ok(first, "First subscriber should have been called");
+    ok(second, "Second subscriber should have been called");
+    ok(third, "Third subscriber should have been called");
+    
 });

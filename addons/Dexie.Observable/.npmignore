@@ -1,2 +1,6 @@
-tools/tmp
+tools/
+src/
 .*
+tmp/
+**/tmp/
+test

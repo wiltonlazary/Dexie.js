@@ -2,18 +2,18 @@
 import {ok, start, test, config} from 'QUnit';
 
 // Custom QUnit config options.
-config.urlConfig.push({
-    id: "polyfillIE",
+config.urlConfig.push(/*{
+    id: "polyfillIE", // Remarked because has no effect anymore. Find out why.
 	label: "Include IE Polyfill",
     tooltip: "Enabling this will include the idb-iegap polyfill that makes" +
     " IE10&IE11 support multiEntry and compound indexes as well as compound" +
     " primary keys"
 }, {
-    id: "indexedDBShim",
+    id: "indexedDBShim", // Remarked because has no effect anymore. Need to find out why. Should invoke the shim if set!
     label: "IndexedDBShim (UseWebSQL as backend)",
     tooltip: "Enable this in Safari browsers without indexedDB support or" +
     " with poor indexedDB support"
-}, {
+},*/ {
     id: "dontoptimize",
     label: "Dont optimize tests",
     tooltip: "Always delete and recreate the DB between each test"
@@ -25,10 +25,10 @@ config.urlConfig.push({
     " dexie.js are also included)"
  });
 
-Dexie.debug = window.location.search.indexOf('longstacks=true') !== -1 ? 'dexie' : false;
+Dexie.debug = window.location.search.indexOf('longstacks') !== -1 ? 'dexie' : false;
 if (window.location.search.indexOf('longstacks=tests') !== -1) Dexie.debug = true; // Don't include stuff from dexie.js.
 
-var no_optimize = window.no_optimize || window.location.search.indexOf('dontoptimize=true') !== -1;
+var no_optimize = window.no_optimize || window.location.search.indexOf('dontoptimize') !== -1;
 
 export function resetDatabase(db) {
     /// <param name="db" type="Dexie"></param>
@@ -125,15 +125,17 @@ export function supports (features) {
     return features.split('+').reduce((result,feature)=>{
         switch (feature.toLowerCase()) {
             case "compound":
-                return Array.isArray(Dexie.maxKey);
+                return result && Array.isArray(Dexie.maxKey);
             case "multientry":
                 return result && (hasPolyfillIE || (!isIE && !isEdge)); // Should add Safari to
+            case "deleteobjectstoreafterread":
+                return result && (!isIE && !isEdge);
             case "versionchange":
-                return true;
+                return result;
                 //return result && (!isIE && !isEdge); // Should add Safari to
             case "binarykeys":
                 try {
-                    return Array.isArray(Dexie.maxKey) && indexedDB.cmp(new Uint8Array([1]), new Uint8Array([1])) === 0;
+                    return result && Array.isArray(Dexie.maxKey) && indexedDB.cmp(new Uint8Array([1]), new Uint8Array([1])) === 0;
                 } catch (e) {
                     return false;
                 }
