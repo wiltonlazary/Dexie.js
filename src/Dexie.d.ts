@@ -273,7 +273,7 @@ export declare module Dexie {
     }
 
     interface DbEvents extends DexieEventSet {
-        (eventName: 'ready', subscriber: () => any, bSticky: boolean): void;
+        (eventName: 'ready', subscriber: () => any, bSticky?: boolean): void;
         (eventName: 'populate', subscriber: () => any): void;
         (eventName: 'blocked', subscriber: () => any): void;
         (eventName: 'versionchange', subscriber: (event: IDBVersionChangeEvent) => any): void;
@@ -283,11 +283,26 @@ export declare module Dexie {
         versionchange: Dexie.DexieVersionChangeEvent;        
     }
 
+    interface CreatingHookContext<T,Key> {
+        onsuccess?: (primKey: Key) => void;
+        onerror?: (err: any) => void;
+    }
+
+    interface UpdatingHookContext<T,Key> {
+        onsuccess?: (updatedObj: T) => void;
+        onerror?: (err: any) => void;
+    }
+
+    interface DeletingHookContext<T,Key> {
+        onsuccess?: () => void;
+        onerror?: (err: any) => void;
+    }
+
     interface TableHooks<T,Key> extends DexieEventSet {
-        (eventName: 'creating', subscriber: (primKey:Key, obj:T, transaction:Transaction) => any): void;
+        (eventName: 'creating', subscriber: (this: CreatingHookContext<T,Key>, primKey:Key, obj:T, transaction:Transaction) => any): void;
         (eventName: 'reading', subscriber: (obj:T) => T | any): void;
-        (eventName: 'updating', subscriber: (modifications:Object, primKey:Key, obj:T, transaction:Transaction) => any): void;
-        (eventName: 'deleting', subscriber: (primKey:Key, obj:T, transaction:Transaction) => any): void;
+        (eventName: 'updating', subscriber: (this: UpdatingHookContext<T,Key>, modifications:Object, primKey:Key, obj:T, transaction:Transaction) => any): void;
+        (eventName: 'deleting', subscriber: (this: DeletingHookContext<T,Key>, primKey:Key, obj:T, transaction:Transaction) => any): void;
         creating: DexieEvent;
         reading: DexieEvent;
         updating: DexieEvent;

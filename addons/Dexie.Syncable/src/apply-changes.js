@@ -3,32 +3,32 @@ import { CREATE, DELETE, UPDATE } from './change_types';
 import bulkUpdate from './bulk-update';
 
 export default function initApplyChanges(db) {
-  return function applyChanges(changes, offset) {
-    const length = changes.length;
-    // This is the base case for the recursion
-    if (offset >= length) return Dexie.Promise.resolve(null);
-    const firstChange = changes[offset];
-    let i, change;
-    for (i=offset + 1; i < length; ++i) {
-      change = changes[i];
-      if (change.type !== firstChange.type ||
-          change.table !== firstChange.table)
-        break;
-    }
-    const table = db.table(firstChange.table);
-    const specifyKeys = !table.schema.primKey.keyPath;
-    const changesToApply = changes.slice(offset, i);
-    const changeType = firstChange.type;
-    const bulkPromise =
-        changeType === CREATE ?
-            table.bulkPut(changesToApply.map(c => c.obj), specifyKeys ?
-                changesToApply.map(c => c.key) : undefined) :
-            changeType === UPDATE ?
-                bulkUpdate(table, changesToApply) :
-                changeType === DELETE ?
-                    table.bulkDelete(changesToApply.map(c => c.key)) :
-                    Dexie.Promise.resolve(null);
+  return function applyChanges(changes) {
+    let collectedChanges = {};
+    changes.forEach((change) => {
+      if (!collectedChanges.hasOwnProperty(change.table)) {
+        collectedChanges[change.table] = { [CREATE]: [], [DELETE]: [], [UPDATE]: [] };
+      }
+      collectedChanges[change.table][change.type].push(change);
+    });
+    let table_names = Object.keys(collectedChanges);
+    let tables = table_names.map((table) => db.table(table));
 
-    return bulkPromise.then(()=>applyChanges(changes, i));
+    return db.transaction("rw", tables, () => {
+      table_names.forEach((table_name) => {
+        const table = db.table(table_name);
+        const specifyKeys = !table.schema.primKey.keyPath;
+        const createChangesToApply = collectedChanges[table_name][CREATE];
+        const deleteChangesToApply = collectedChanges[table_name][DELETE];
+        const updateChangesToApply = collectedChanges[table_name][UPDATE];
+        if (createChangesToApply.length > 0)
+          table.bulkPut(createChangesToApply.map(c => c.obj), specifyKeys ?
+            createChangesToApply.map(c => c.key) : undefined);
+        if (updateChangesToApply.length > 0)
+          bulkUpdate(table, updateChangesToApply);
+        if (deleteChangesToApply.length > 0)
+          table.bulkDelete(deleteChangesToApply.map(c => c.key));
+      });
+    });
   };
 }

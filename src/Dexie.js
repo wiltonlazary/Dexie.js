@@ -414,7 +414,7 @@ export default function Dexie(dbName, options) {
         return new Transaction(mode, storeNames, dbschema, parentTransaction);
     };
 
-    /* Generate a temporary transaction when db operations are done outside a transactino scope.
+    /* Generate a temporary transaction when db operations are done outside a transaction scope.
     */
     function tempTransaction(mode, storeNames, fn) { // Last argument is "writeLocked". But this doesnt apply to oneshot direct db operations, so we ignore it.
         if (!openComplete && (!PSD.letThrough)) {
@@ -2082,7 +2082,9 @@ export default function Dexie(dbName, options) {
 
                 function union(item, cursor, advance) {
                     if (!filter || filter(cursor, advance, resolveboth, reject)) {
-                        var key = cursor.primaryKey.toString(); // Converts any Date to String, String to String, Number to String and Array to comma-separated string
+                        var primaryKey = cursor.primaryKey;
+                        var key = '' + primaryKey;
+                        if (key === '[object ArrayBuffer]') key = '' + new Uint8Array(primaryKey);
                         if (!hasOwn(set, key)) {
                             set[key] = true;
                             fn(item, cursor, advance);
@@ -2782,10 +2784,12 @@ export default function Dexie(dbName, options) {
         /// <param name="schema" type="Object">Map between name and TableSchema</param>
         /// <param name="idbtrans" type="IDBTransaction"></param>
         var storeNames = idbtrans.db.objectStoreNames;
+
         for (var i = 0; i < storeNames.length; ++i) {
             var storeName = storeNames[i];
             var store = idbtrans.objectStore(storeName);
             hasGetAll = 'getAll' in store;
+            
             for (var j = 0; j < store.indexNames.length; ++j) {
                 var indexName = store.indexNames[j];
                 var keyPath = store.index(indexName).keyPath;
@@ -2796,6 +2800,15 @@ export default function Dexie(dbName, options) {
                 }
             }
         }
+
+        // Bug with getAll() on Safari ver<604 on Workers only, see discussion following PR #579
+        if (/Safari/.test(navigator.userAgent) &&
+            !/(Chrome\/|Edge\/)/.test(navigator.userAgent) &&
+            _global.WorkerGlobalScope && _global instanceof _global.WorkerGlobalScope &&
+            [].concat(navigator.userAgent.match(/Safari\/(\d*)/))[1] < 604)
+        {
+            hasGetAll = false;
+        }    
     }
 
     function fireOnBlocked(ev) {
